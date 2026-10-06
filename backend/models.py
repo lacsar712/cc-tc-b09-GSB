@@ -27,6 +27,19 @@ class ConvergenceLog(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PeakLock(Base):
+    """断面峰值锁区：锁定那一刻的峰值只读副本，手改直存、永不重算。"""
+
+    __tablename__ = "peak_locks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chainage: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    peak_mm: Mapped[float] = mapped_column(Float, nullable=False)
+    peak_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    locked_by: Mapped[str] = mapped_column(String, nullable=False)
+
+
 def row_dict(row: ConvergenceLog) -> dict:
     return {
         "id": row.id,
@@ -38,4 +51,15 @@ def row_dict(row: ConvergenceLog) -> dict:
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "processed_at": row.processed_at.isoformat() if row.processed_at else None,
+    }
+
+
+def lock_dict(row: PeakLock) -> dict:
+    return {
+        "id": row.id,
+        "chainage": row.chainage,
+        "peak_mm": row.peak_mm,
+        "peak_at": row.peak_at.isoformat() if row.peak_at else None,
+        "locked_at": row.locked_at.isoformat() if row.locked_at else None,
+        "locked_by": row.locked_by,
     }
