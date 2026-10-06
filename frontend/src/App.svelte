@@ -1,6 +1,9 @@
 <script>
   let session = null;
   let logs = [];
+  let peaks = [];
+  let locks = [];
+  let view = "main";
   let loginUser = "surveyor";
   let loginPass = "surv123456";
   let chainage = "";
@@ -17,12 +20,19 @@
 
   async function refresh() {
     if (!session) return;
-    const res = await fetch("/api/logs", { headers: headers() });
-    if (res.status === 401) {
+    const opts = { headers: headers() };
+    const [logsRes, peaksRes, locksRes] = await Promise.all([
+      fetch("/api/logs", opts),
+      fetch("/api/peaks", opts),
+      fetch("/api/locks", opts),
+    ]);
+    if (logsRes.status === 401 || peaksRes.status === 401 || locksRes.status === 401) {
       logout();
       return;
     }
-    if (res.ok) logs = await res.json();
+    if (logsRes.ok) logs = await logsRes.json();
+    if (peaksRes.ok) peaks = await peaksRes.json();
+    if (locksRes.ok) locks = await locksRes.json();
   }
 
   async function login() {
@@ -54,6 +64,9 @@
     if (timer) clearInterval(timer);
     session = null;
     logs = [];
+    peaks = [];
+    locks = [];
+    view = "main";
     localStorage.removeItem("tunnel_session");
   }
 
@@ -81,6 +94,35 @@
     }
   }
 
+  async function lockPeak(target) {
+    error = "";
+    loading = true;
+    try {
+      // 只发断面桩号，峰值与时刻由服务端按办结集合重算后写入锁区
+      const res = await fetch("/api/peaks/lock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers() },
+        body: JSON.stringify({ chainage: target }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        error = data.detail || "锁定失败";
+        return;
+      }
+      await refresh();
+    } catch {
+      error = "锁定时网络异常";
+    } finally {
+      loading = false;
+    }
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleString();
+  }
+
   const raw = localStorage.getItem("tunnel_session");
   if (raw) {
     try {
@@ -102,11 +144,21 @@
   }
   main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
   h1 { color: #fbbf24; margin: 0 0 0.25rem; }
+  h2 { color: #fcd34d; margin: 0; font-size: 1.05rem; }
   .sub { color: #a8a29e; margin-bottom: 1.25rem; }
   section {
     background: #292524; border: 1px solid #44403c; border-radius: 8px;
     padding: 1rem 1.25rem; margin-bottom: 1rem;
   }
+  .wall {
+    border-color: #b45309;
+    background: #241f1a;
+  }
+  .wall-head {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem;
+  }
+  .wall-head .actions { display: flex; gap: 0.5rem; }
   label { display: block; font-size: 0.85rem; color: #d6d3d1; margin-bottom: 0.25rem; }
   input {
     width: 100%; box-sizing: border-box; padding: 0.5rem 0.65rem; border-radius: 6px;
@@ -116,6 +168,7 @@
     cursor: pointer; padding: 0.5rem 1rem; border: none; border-radius: 6px;
     background: #d97706; color: #fff; font-weight: 600;
   }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.secondary { background: #57534e; }
   .err { color: #fb7185; }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
@@ -124,6 +177,7 @@
   .ok { background: #14532d; color: #86efac; }
   .bad { background: #7f1d1d; color: #fca5a5; }
   .pending { background: #713f12; color: #fde68a; }
+  .locked { background: #1e3a8a; color: #bfdbfe; }
 </style>
 
 <main>
@@ -138,11 +192,52 @@
       <button disabled={loading} on:click={login}>登录</button>
       {#if error}<p class="err">{error}</p>{/if}
     </section>
-  {:else}
-    <p class="sub">已登录：{session.username}（{isWriter ? "可提交" : "只读"}）</p>
-    <section>
-      <button class="secondary" on:click={logout}>退出</button>
-      <button class="secondary" disabled={loading} on:click={refresh}>刷新列表</button>
+  {:else if view === "main"}
+    <p class="sub">已登录：{session.username}（{isWriter ? "测量员，可提交可锁定" : "巡检岗，只许观看"}）</p>
+    <section class="wall">
+      <div class="wall-head">
+        <h2>峰值墙 · 拱顶历史峰值</h2>
+        <div class="actions">
+          <button class="secondary" disabled={loading} on:click={refresh}>刷新</button>
+          <button class="secondary" on:click={() => (view = "locks")}>锁区专页</button>
+          <button class="secondary" on:click={logout}>退出</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>断面</th><th>峰值mm</th><th>峰值时刻</th><th>状态</th>{#if isWriter}<th>操作</th>{/if}
+          </tr>
+        </thead>
+        <tbody>
+          {#each peaks as p}
+            <tr>
+              <td>{p.chainage}</td>
+              <td>{p.peak_delta_mm ?? "—"}</td>
+              <td>{fmtTime(p.peak_at)}</td>
+              <td>
+                {#if p.locked}
+                  <span class="tag locked">已锁</span>
+                {:else if p.peak_delta_mm == null}
+                  <span class="tag pending">待办结</span>
+                {:else}
+                  <span class="tag ok">未锁</span>
+                {/if}
+              </td>
+              {#if isWriter}
+                <td>
+                  {#if !p.locked && p.peak_delta_mm != null}
+                    <button disabled={loading} on:click={() => lockPeak(p.chainage)}>锁定</button>
+                  {:else}—{/if}
+                </td>
+              {/if}
+            </tr>
+          {:else}
+            <tr><td colspan={isWriter ? 5 : 4}>暂无断面</td></tr>
+          {/each}
+        </tbody>
+      </table>
+      {#if error}<p class="err">{error}</p>{/if}
     </section>
     {#if isWriter}
       <section>
@@ -151,10 +246,10 @@
         <label>收敛（毫米，可正可负）</label>
         <input type="number" step="0.1" bind:value={deltaMm} />
         <button disabled={loading} on:click={submit}>提交（进入待认领）</button>
-        {#if error}<p class="err">{error}</p>{/if}
       </section>
     {/if}
     <section>
+      <h2>办结集合</h2>
       <table>
         <thead>
           <tr><th>编号</th><th>桩号</th><th>收敛mm</th><th>状态</th><th>结论</th><th>说明</th></tr>
@@ -173,6 +268,36 @@
               </td>
               <td>{row.reason ?? "—"}</td>
             </tr>
+          {/each}
+        </tbody>
+      </table>
+    </section>
+  {:else}
+    <p class="sub">已登录：{session.username}（{isWriter ? "测量员，可提交可锁定" : "巡检岗，只许观看"}）</p>
+    <section class="wall">
+      <div class="wall-head">
+        <h2>锁区专页 · 只读副本</h2>
+        <div class="actions">
+          <button class="secondary" disabled={loading} on:click={refresh}>刷新</button>
+          <button class="secondary" on:click={() => (view = "main")}>返回峰值墙</button>
+        </div>
+      </div>
+      <p class="sub">锁定那一刻的峰值与时刻已压成只读副本，任何角色都只能观看，之后新办结不再改动这些列。</p>
+      <table>
+        <thead>
+          <tr><th>断面</th><th>锁定峰值mm</th><th>峰值时刻</th><th>锁定人</th><th>锁定时刻</th></tr>
+        </thead>
+        <tbody>
+          {#each locks as lock}
+            <tr>
+              <td>{lock.chainage}</td>
+              <td>{lock.peak_delta_mm}</td>
+              <td>{fmtTime(lock.peak_at)}</td>
+              <td>{lock.locked_by}</td>
+              <td>{fmtTime(lock.locked_at)}</td>
+            </tr>
+          {:else}
+            <tr><td colspan="5">锁区为空</td></tr>
           {/each}
         </tbody>
       </table>
